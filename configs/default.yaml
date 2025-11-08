@@ -51,7 +51,7 @@ scale_alignment:
 # Phase 3: Depth-to-RGB Alignment
 align:
   in_depth_unit: "auto"      # "m", "mm", or "auto" (auto-detect)
-  use_simple_resize: true    # True for hardware-aligned depth (Orbbec)
+  use_simple_resize: false   # Use proper geometric transformation with intrinsics/extrinsics
   hole_fill: true
   joint_bilateral: true
   bilateral_d: 9
