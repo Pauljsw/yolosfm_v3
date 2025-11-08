@@ -1,29 +1,15 @@
 {
-
   "description": "Extrinsic transformation from Depth to Color frame (Orbbec Femto Bolt)",
-
   "camera": "Femto Bolt",
-
   "serial_number": "CL8855300BX",
-
   "firmware_version": "1.0.9",
-
   "R": [
-
-    [0.994191, 0.006611, 0.007913],
-
-    [-0.007422, 0.994199, 0.107296],
-
-    [-0.007157, -0.107349, 0.994196]
-
+    [0.994191, 0.00661117, 0.00791255],
+    [-0.0074222, 0.994199, 0.107296],
+    [-0.0071573, -0.107349, 0.994196]
   ],
-
-  "t": [-0.032196, -0.000814, 0.002416],
-
-  "t_mm": [-32.196426, -0.813711, 2.415566],
-
-  "baseline_mm": 32.297165,
-
+  "t": [-0.0321964, -0.000813711, 0.00241557],
+  "t_mm": [-32.1964, -0.813711, 2.41557],
+  "baseline_mm": 32.2972,
   "note": "This transformation converts points from depth camera coordinates to color camera coordinates. Apply as: P_color = R * P_depth + t"
-
 }
