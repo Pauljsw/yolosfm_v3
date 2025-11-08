@@ -1,0 +1,51 @@
+cmake_minimum_required(VERSION 3.10)
+project(OrbbecCalibExtractor)
+
+set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Custom SDK path (not installed to system)
+set(ORBBEC_SDK_PATH "/home/sungwoo/Downloads/OrbbecSDK_C_C++_v1.10.27_20250925_0549823_linux_x64_release/OrbbecSDK_v1.10.27")
+
+# Find include directory
+find_path(ORBBEC_INCLUDE_DIR libobsensor/ObSensor.hpp
+    PATHS
+        "${ORBBEC_SDK_PATH}/SDK/include"
+        "${ORBBEC_SDK_PATH}/include"
+        /usr/local/include
+        /usr/include
+    NO_DEFAULT_PATH  # Only search specified paths
+)
+
+# Find library
+find_library(ORBBEC_LIBRARY
+    NAMES OrbbecSDK
+    PATHS
+        "${ORBBEC_SDK_PATH}/SDK/lib"
+        "${ORBBEC_SDK_PATH}/lib"
+        /usr/local/lib
+        /usr/lib
+    NO_DEFAULT_PATH
+)
+
+if(NOT ORBBEC_INCLUDE_DIR OR NOT ORBBEC_LIBRARY)
+    message(FATAL_ERROR "OrbbecSDK not found!\n"
+                        "  Searched in: ${ORBBEC_SDK_PATH}\n"
+                        "  Please check SDK path or install SDK to system:\n"
+                        "    cd ${ORBBEC_SDK_PATH}\n"
+                        "    sudo ./install.sh")
+endif()
+
+message(STATUS "Found OrbbecSDK include: ${ORBBEC_INCLUDE_DIR}")
+message(STATUS "Found OrbbecSDK library: ${ORBBEC_LIBRARY}")
+
+include_directories(${ORBBEC_INCLUDE_DIR})
+
+add_executable(extract_calib extract_calib.cpp)
+target_link_libraries(extract_calib ${ORBBEC_LIBRARY})
+
+# Add rpath so executable can find library at runtime
+set_target_properties(extract_calib PROPERTIES
+    INSTALL_RPATH "${ORBBEC_SDK_PATH}/SDK/lib:${ORBBEC_SDK_PATH}/lib"
+    BUILD_WITH_INSTALL_RPATH TRUE
+)
