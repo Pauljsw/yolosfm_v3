@@ -1,0 +1,14 @@
+# Default YOLO dataset definition for bridge defect segmentation
+nc: 9
+names:
+  - crack
+  - efflorescence
+  - detachment
+  - leak
+  - spalling
+  - material separation
+  - rebar
+  - damage
+  - exhilaration
+train: images/train
+val: images/val

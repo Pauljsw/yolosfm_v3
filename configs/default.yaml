@@ -1,0 +1,113 @@
+paths:
+  rgb_dir: data/rgb
+  depth_dir: data/depth
+  masks_dir: data/yolo_masks
+  sfm_dir: data/sfm
+  depth_gt_dir: output_depth_tsdf  # Phase 1 output
+  calib_rgb: calib/rgb_camera_info.json
+  calib_depth: calib/depth_camera_info.json
+  out_dir: outputs
+
+yolo:
+  weights: models/best.pt   # Path to YOLO segmentation weights
+  data_config: yolo_data.yaml
+  conf: 0.20                # Confidence threshold
+  iou: 0.45                 # NMS IoU threshold
+  img_size: 1280            # Inference image size
+  device: null              # e.g. "0" for GPU, null for auto
+  max_det: 300              # Maximum detections per image
+
+sfm:
+  camera_model: OPENCV      # PINHOLE, OPENCV, RADIAL, SIMPLE_RADIAL
+  quality: high             # low, medium, high, extreme
+  use_gpu: true
+  dense: false              # Run dense reconstruction (slow)
+
+# Phase 1: Depth-only Ground Truth Reconstruction with Robust ICP Odometry
+depth_reconstruction:
+  # TSDF Volume Parameters
+  tsdf_voxel_size: 0.01       # TSDF voxel size in meters (1cm = high detail, 2cm = balanced, 5cm = coarse)
+  tsdf_trunc_factor: 4.0      # Truncation distance = voxel_size * factor (3-5x typical)
+  depth_trunc: 10.0           # Maximum valid depth in meters (filter far points)
+
+  # Depth Image Parameters
+  depth_unit: "auto"          # Depth unit: "m", "mm", or "auto" (auto-detect based on median value)
+
+  # ICP Odometry Parameters
+  use_icp: true               # Enable ICP for pose estimation (highly recommended for accuracy)
+  icp_voxel_size: 0.02        # ICP downsample voxel size in meters (2cm = good balance)
+  icp_max_corr_dist: 0.05     # ICP max correspondence distance in meters (5cm typical)
+  icp_max_iterations: 50      # Maximum ICP iterations per frame
+
+  # Undistortion (optional, usually not needed for factory-calibrated depth)
+  use_undistortion: false     # Enable depth image undistortion (requires accurate distortion model)
+
+# Phase 2: SFM Scale Alignment
+scale_alignment:
+  use_camera_trajectory: true  # Use camera trajectory alignment (most robust, recommended)
+  use_feature_matching: true   # Use FPFH features as fallback
+  max_points: 10000            # Max points for alignment (subsampling)
+
+# Phase 3: Depth-to-RGB Alignment
+align:
+  in_depth_unit: "auto"      # "m", "mm", or "auto" (auto-detect)
+  use_simple_resize: false   # True for hardware-aligned depth (Orbbec)
+  hole_fill: true
+  joint_bilateral: true
+  bilateral_d: 9
+  bilateral_sigma_color: 75
+  bilateral_sigma_space: 75
+
+fusion:
+  voxel_size_cm: 0.1        # coarse
+  voxel_size_mm_crack: 3.0  # fine for crack ROI
+  prob_thresh: 0.05
+  weight:
+    angle_cos_min: 0.3
+    conf_min: 0.2
+    distance_decay_sigma: 2.0  # meters
+
+merge:
+  dbscan_eps_voxel_mul: 3.0
+  dbscan_min_pts: 10
+  iou_merge_thresh: 0.3
+  skeleton_gap_thresh_cm: 2.0
+
+reinfer:
+  mode: auto   # off | on | auto
+  tile_px: 1280
+  tile_overlap: 0.1
+  uv_resolution_mm_px: 2.0
+  triggers:
+    gap_cm: 8.0
+    conflict_rate: 0.15
+    mean_conf: 0.45
+    scale_std_ratio: 0.2
+
+measure:
+  crack_skeleton_smooth: true
+  crack_min_length_cm: 5.0
+  area_min_m2: 0.001
+  export_formats: ["ply", "geojson", "csv"]
+
+classes:
+  crack: 0
+  efflorescence: 1
+  detachment: 2
+  leak: 3
+  spalling: 4
+  material separation: 5
+  rebar: 6
+  damage: 7
+  exhilaration: 8
+
+colors:
+  crack: [255, 0, 0]
+  efflorescence: [0, 255, 0]
+  detachment: [0, 0, 255]
+  leak: [255, 255, 0]
+  spalling: [255, 0, 255]
+  material separation: [0, 255, 255]
+  rebar: [255, 128, 0]
+  damage: [128, 0, 255]
+  exhilaration: [0, 128, 255]
