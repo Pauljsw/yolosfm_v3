@@ -190,12 +190,13 @@ def align_depth_to_rgb(
         return np.zeros((h_rgb, w_rgb), dtype=np.float32)
     
     logger.debug(f"Valid depth pixels: {len(depth_values)}/{h_depth*w_depth}")
-    
-    # Undistort depth coordinates (optional, often depth is already rectified)
-    # depth_points = np.stack([u_depth, v_depth], axis=-1)
-    # depth_points_undist = undistort_points(depth_points, depth_K, depth_D)
-    # u_depth, v_depth = depth_points_undist[:, 0], depth_points_undist[:, 1]
-    
+
+    # Undistort depth coordinates
+    depth_points = np.stack([u_depth, v_depth], axis=-1)
+    depth_points_undist = undistort_points(depth_points, depth_K, depth_D)
+    u_depth, v_depth = depth_points_undist[:, 0], depth_points_undist[:, 1]
+    logger.debug(f"Undistorted depth coordinates")
+
     # Backproject to 3D (depth camera frame)
     points_3d = backproject_depth(u_depth, v_depth, depth_values, depth_K)
     
