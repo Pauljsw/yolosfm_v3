@@ -1,11 +1,14 @@
 """
-Align Depth to RGB Module (Improved with Sub-pixel Splatting)
+Align Depth to RGB Module (Dense Completion Support)
 Aligns depth images (512x512) to RGB resolution (3840x2160) with proper calibration.
 
-Key improvements:
-- Sub-pixel splatting: Bilinear distribution to 4-neighbor pixels
-- Auto-direction probe: Automatically choose correct extrinsics direction
-- Z-buffer with sub-pixel accuracy
+Key features:
+- Geometric alignment with extrinsics (Depth→RGB)
+- Sub-pixel splatting (NN or bilinear)
+- Safe hole filling with limits
+- Dense completion via JBU (Joint Bilateral Upsampling) when RGB provided
+- Confidence map support
+- Optional plane filling
 """
 import numpy as np
 import cv2
@@ -16,35 +19,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def undistort_points(points: np.ndarray, K: np.ndarray, D: np.ndarray,
-                     distortion_model: str = 'rational_polynomial') -> np.ndarray:
-    """
-    Undistort image points using camera calibration.
-
-    Args:
-        points: Nx2 array of image points (u, v)
-        K: 3x3 camera intrinsic matrix
-        D: Distortion coefficients
-        distortion_model: 'rational_polynomial' or 'radial_tangential'
-
-    Returns:
-        Nx2 array of undistorted points
-    """
-    if len(points) == 0:
-        return points
-
-    # Reshape for cv2
-    points = points.reshape(-1, 1, 2).astype(np.float32)
-
-    if distortion_model == 'rational_polynomial':
-        # OpenCV's undistortPoints expects distortion in specific format
-        # For rational polynomial: k1,k2,p1,p2,k3,k4,k5,k6
-        undistorted = cv2.undistortPoints(points, K, D, None, K)
-    else:  # radial_tangential
-        undistorted = cv2.undistortPoints(points, K, D, None, K)
-
-    return undistorted.reshape(-1, 2)
-
+# ======================== Geometry Utilities ========================
 
 def backproject_depth(u: np.ndarray, v: np.ndarray, depth: np.ndarray,
                       K: np.ndarray) -> np.ndarray:
@@ -96,139 +71,260 @@ def project_3d_to_image(points_3d: np.ndarray, K: np.ndarray) -> Tuple[np.ndarra
     return np.stack([u, v], axis=-1), valid
 
 
-def splat_depth_subpixel(rgb_coords: np.ndarray, depth_values: np.ndarray,
-                         w_rgb: int, h_rgb: int) -> np.ndarray:
-    """
-    Splat depth values to RGB image with sub-pixel accuracy using bilinear weights.
+# ======================== Splatting Methods ========================
 
-    Each depth point is distributed to its 4-neighbor pixels with bilinear weights,
-    and Z-buffer keeps the closest depth value for each pixel.
+def splat_nn(rgb_w: int, rgb_h: int, xy: np.ndarray, z: np.ndarray) -> np.ndarray:
+    """
+    Nearest-neighbor splat with Z-buffer.
 
     Args:
-        rgb_coords: Nx2 array of projected coordinates (u, v) in RGB image (float)
-        depth_values: N array of depth values in meters
-        w_rgb: RGB image width
-        h_rgb: RGB image height
+        rgb_w, rgb_h: Output image dimensions
+        xy: Nx2 array of projected coordinates (u, v)
+        z: N array of depth values in meters
 
     Returns:
-        Aligned depth image (h_rgb, w_rgb) in meters
+        Aligned depth image (rgb_h, rgb_w) in meters
     """
-    aligned_depth = np.zeros((h_rgb, w_rgb), dtype=np.float32)
-    z_buffer = np.full((h_rgb, w_rgb), np.inf, dtype=np.float32)
+    out = np.zeros((rgb_h, rgb_w), dtype=np.float32)
+    u = np.rint(xy[:, 0]).astype(np.int32)
+    v = np.rint(xy[:, 1]).astype(np.int32)
+    ok = (u >= 0) & (u < rgb_w) & (v >= 0) & (v < rgb_h)
+    u, v, z = u[ok], v[ok], z[ok]
 
-    x = rgb_coords[:, 0]
-    y = rgb_coords[:, 1]
-    z = depth_values
+    for i in range(len(u)):
+        if out[v[i], u[i]] == 0 or z[i] < out[v[i], u[i]]:
+            out[v[i], u[i]] = z[i]
 
-    # Floor coordinates
-    x0 = np.floor(x).astype(np.int32)
-    y0 = np.floor(y).astype(np.int32)
-    x1 = x0 + 1
-    y1 = y0 + 1
-
-    # Fractional parts (bilinear weights)
-    wx = x - x0
-    wy = y - y0
-
-    # 4-neighbor weights
-    w00 = (1 - wx) * (1 - wy)  # (x0, y0)
-    w10 = wx * (1 - wy)        # (x1, y0)
-    w01 = (1 - wx) * wy        # (x0, y1)
-    w11 = wx * wy              # (x1, y1)
-
-    # Helper function: Splat to pixel with z-buffer
-    def splat_to_pixel(ix: np.ndarray, iy: np.ndarray, weights: np.ndarray, z_vals: np.ndarray):
-        """Splat depth values to pixels, keeping minimum z (closest)."""
-        # Filter pixels within bounds and with non-negligible weight
-        valid = (weights > 1e-8) & (ix >= 0) & (ix < w_rgb) & (iy >= 0) & (iy < h_rgb)
-        if not np.any(valid):
-            return
-
-        ix_v = ix[valid]
-        iy_v = iy[valid]
-        z_v = z_vals[valid]
-
-        # Update z-buffer: keep closest depth
-        for i in range(len(ix_v)):
-            xx, yy, zz = ix_v[i], iy_v[i], z_v[i]
-            if zz < z_buffer[yy, xx]:
-                z_buffer[yy, xx] = zz
-                aligned_depth[yy, xx] = zz
-
-    # Splat to 4 neighbors
-    splat_to_pixel(x0, y0, w00, z)
-    splat_to_pixel(x1, y0, w10, z)
-    splat_to_pixel(x0, y1, w01, z)
-    splat_to_pixel(x1, y1, w11, z)
-
-    return aligned_depth
+    return out
 
 
-def probe_extrinsics_direction(
-    u_depth: np.ndarray, v_depth: np.ndarray, depth_values: np.ndarray,
-    depth_K: np.ndarray, rgb_K: np.ndarray,
-    R_fwd: np.ndarray, t_fwd: np.ndarray,
-    w_rgb: int, h_rgb: int,
-    sample_ratio: float = 0.1
-) -> Tuple[np.ndarray, np.ndarray]:
+def splat_bilinear(rgb_w: int, rgb_h: int, xy: np.ndarray, z: np.ndarray) -> np.ndarray:
     """
-    Auto-detect correct extrinsics direction by comparing forward and inverse transformations.
+    Bilinear splat with Z-buffer.
 
-    Tests both R,t (Depth→RGB) and R^T,-R^T*t (RGB→Depth) on a sample of points,
-    and returns the one that projects more points in-bounds.
+    Distributes each depth point to 4-neighbor pixels with bilinear weights.
+    Z-buffer keeps closest depth for each pixel.
 
     Args:
-        u_depth, v_depth: Depth pixel coordinates
-        depth_values: Depth values in meters
-        depth_K: Depth camera intrinsic matrix
-        rgb_K: RGB camera intrinsic matrix
-        R_fwd, t_fwd: Forward transformation (assumed Depth→RGB)
-        w_rgb, h_rgb: RGB image dimensions
-        sample_ratio: Fraction of points to sample for testing
+        rgb_w, rgb_h: Output image dimensions
+        xy: Nx2 array of projected coordinates (u, v)
+        z: N array of depth values in meters
 
     Returns:
-        (R_best, t_best): Best extrinsics to use
+        Aligned depth image (rgb_h, rgb_w) in meters
     """
-    # Sample points for speed
-    n_total = len(u_depth)
-    n_sample = max(1000, int(n_total * sample_ratio))
-    n_sample = min(n_sample, n_total)
+    out = np.zeros((rgb_h, rgb_w), dtype=np.float32)
 
-    if n_total > n_sample:
-        indices = np.random.choice(n_total, n_sample, replace=False)
-        u_s = u_depth[indices]
-        v_s = v_depth[indices]
-        z_s = depth_values[indices]
-    else:
-        u_s, v_s, z_s = u_depth, v_depth, depth_values
+    for i in range(len(z)):
+        x, y, zz = xy[i, 0], xy[i, 1], z[i]
+        if not (zz > 0):
+            continue
 
-    # Backproject to 3D
-    P_depth = backproject_depth(u_s, v_s, z_s, depth_K)
+        x0 = int(np.floor(x))
+        y0 = int(np.floor(y))
+        x1, y1 = x0 + 1, y0 + 1
 
-    # Compute inverse extrinsics (RGB→Depth)
-    R_inv = R_fwd.T
-    t_inv = -R_inv @ t_fwd
+        if x1 < 0 or y1 < 0 or x0 >= rgb_w or y0 >= rgb_h:
+            continue
 
-    def score_transform(R, t):
-        """Score: ratio of points projecting in-bounds to RGB."""
-        P_rgb = P_depth @ R.T + t.T
-        uv_rgb, valid = project_3d_to_image(P_rgb, rgb_K)
-        x_rgb, y_rgb = uv_rgb[:, 0], uv_rgb[:, 1]
-        in_bounds = (x_rgb >= 0) & (x_rgb < w_rgb) & (y_rgb >= 0) & (y_rgb < h_rgb)
-        return float(np.mean(valid & in_bounds))
+        # Bilinear weights
+        wx = x - x0
+        wy = y - y0
 
-    score_fwd = score_transform(R_fwd, t_fwd)
-    score_inv = score_transform(R_inv, t_inv)
+        # Distribute to 4 neighbors
+        for (xx, yy, w) in [
+            (x0, y0, (1 - wx) * (1 - wy)),
+            (x1, y0, wx * (1 - wy)),
+            (x0, y1, (1 - wx) * wy),
+            (x1, y1, wx * wy),
+        ]:
+            if 0 <= xx < rgb_w and 0 <= yy < rgb_h and w > 1e-8:
+                # Z-buffer: keep closest depth
+                if out[yy, xx] == 0 or zz < out[yy, xx]:
+                    out[yy, xx] = zz
 
-    logger.info(f"Auto-direction probe: forward={score_fwd:.3f}, inverse={score_inv:.3f}")
+    return out
 
-    if score_fwd >= score_inv:
-        logger.info("Using forward extrinsics (Depth→RGB)")
-        return R_fwd, t_fwd
-    else:
-        logger.info("Using inverse extrinsics (RGB→Depth equivalent)")
-        return R_inv, t_inv
 
+# ======================== Hole Filling ========================
+
+def fill_depth_holes(depth: np.ndarray, max_hole_size: int = 10,
+                     max_fill_ratio: float = 0.15) -> np.ndarray:
+    """
+    Fill small holes in depth map using inpainting with safety limits.
+
+    Args:
+        depth: Depth image with holes (zero values)
+        max_hole_size: Maximum hole size to fill (pixels)
+        max_fill_ratio: Maximum ratio of image to fill (safety limit)
+
+    Returns:
+        Depth image with holes filled
+    """
+    h, w = depth.shape
+    mask = (depth <= 0).astype(np.uint8)
+
+    if np.count_nonzero(mask) == 0:
+        return depth
+
+    # Only fill small holes (morphological opening)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (max_hole_size, max_hole_size))
+    opened = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    small_holes = cv2.subtract(mask, opened)
+
+    # Safety check: don't fill too much
+    fill_ratio = float(small_holes.sum()) / (h * w)
+    if fill_ratio > max_fill_ratio:
+        logger.warning(f"Fill ratio {fill_ratio:.2%} exceeds limit {max_fill_ratio:.2%}, skipping hole fill")
+        return depth
+
+    # Inpaint small holes
+    depth_scaled = (depth * 1000.0).astype(np.uint16)
+    filled_scaled = cv2.inpaint(depth_scaled, small_holes, 3, cv2.INPAINT_TELEA)
+    filled = filled_scaled.astype(np.float32) / 1000.0
+
+    # Keep original measurements
+    filled[depth > 0] = depth[depth > 0]
+
+    return filled
+
+
+# ======================== Dense Completion ========================
+
+def jbu_complete_depth_to_dense(aligned_m: np.ndarray, rgb_bgr: np.ndarray,
+                                d: int = 9, sigma_color: float = 75.0,
+                                sigma_space: float = 75.0,
+                                max_fill_ratio: float = 0.6) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    RGB-guided Joint Bilateral Upsampling for dense depth completion.
+
+    Fills all pixels using RGB guidance and simple diffusion, with confidence map.
+
+    Args:
+        aligned_m: Sparse aligned depth (meters)
+        rgb_bgr: RGB image (BGR format)
+        d: JBU window size
+        sigma_color: JBU color sigma
+        sigma_space: JBU space sigma
+        max_fill_ratio: Maximum fill ratio for confidence scaling
+
+    Returns:
+        Tuple of (dense_depth, confidence_map)
+    """
+    H, W = aligned_m.shape
+    has_measurement = aligned_m > 0
+    meas_ratio = float(np.count_nonzero(has_measurement) / (H * W))
+    conf_base = np.clip(meas_ratio / 0.15, 0.0, 1.0)
+
+    dense = aligned_m.copy()
+
+    # JBU on valid regions
+    maxv = float(dense.max(initial=0.0))
+    if maxv > 0:
+        src8 = (dense / maxv * 255.0).astype(np.uint8)
+        try:
+            import cv2.ximgproc as xip
+            guide = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2GRAY)
+            jbu_result = xip.jointBilateralFilter(guide, src8, d, sigma_color, sigma_space)
+            dense = (jbu_result.astype(np.float32) / 255.0) * maxv
+        except Exception:
+            # Fallback to standard bilateral filter
+            bilateral_result = cv2.bilateralFilter(src8, d, sigma_color, sigma_space)
+            dense = (bilateral_result.astype(np.float32) / 255.0) * maxv
+
+    # Simple diffusion to fill remaining holes (3 iterations)
+    for _ in range(3):
+        zero_mask = dense <= 0
+        if not np.any(zero_mask):
+            break
+        avg = cv2.blur(dense, (3, 3))
+        dense[zero_mask] = avg[zero_mask]
+
+    # Restore original measurements
+    dense[has_measurement] = aligned_m[has_measurement]
+
+    # Confidence map
+    confidence = np.full((H, W), conf_base * 0.7, dtype=np.float32)
+    confidence[has_measurement] = 1.0
+
+    # Boost confidence near edges (RGB boundaries likely align with depth boundaries)
+    edges = cv2.Canny(cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2GRAY), 50, 150) > 0
+    confidence[edges] = np.maximum(confidence[edges], conf_base * 0.85)
+
+    # Scale confidence if too much was filled
+    fill_ratio = 1.0 - meas_ratio
+    if fill_ratio > max_fill_ratio:
+        confidence *= (max_fill_ratio / fill_ratio)
+
+    return dense.astype(np.float32), np.clip(confidence, 0, 1)
+
+
+def ransac_plane_fill(aligned_m: np.ndarray, K: np.ndarray,
+                      tol: float = 0.02, zmax: float = 10.0) -> np.ndarray:
+    """
+    Fill large holes using RANSAC plane fitting (optional, for planar scenes).
+
+    Args:
+        aligned_m: Sparse aligned depth
+        K: Camera intrinsic matrix
+        tol: RANSAC inlier tolerance (meters)
+        zmax: Maximum valid depth (meters)
+
+    Returns:
+        Depth with plane-filled holes
+    """
+    H, W = aligned_m.shape
+    yy, xx = np.where(aligned_m > 0)
+    z = aligned_m[yy, xx]
+
+    if len(z) < 500:
+        logger.warning("Not enough points for plane fitting, skipping")
+        return aligned_m
+
+    fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
+    X = (xx - cx) * z / fx
+    Y = (yy - cy) * z / fy
+    P = np.stack([X, Y, z], axis=1)
+
+    # RANSAC plane fitting
+    rng = np.random.default_rng(42)
+    best_inliers = 0
+    best_abc = (0, 0, 0)
+
+    for _ in range(200):
+        idx = rng.choice(len(P), 3, replace=False)
+        A = np.c_[P[idx, 0], P[idx, 1], np.ones(3)]
+        b = P[idx, 2]
+        try:
+            a, b_coef, c = np.linalg.lstsq(A, b, rcond=None)[0]
+        except np.linalg.LinAlgError:
+            continue
+
+        z_pred = P[:, 0] * a + P[:, 1] * b_coef + c
+        n_inliers = int(np.sum(np.abs(z_pred - P[:, 2]) < tol))
+
+        if n_inliers > best_inliers:
+            best_inliers = n_inliers
+            best_abc = (a, b_coef, c)
+
+    a, b_coef, c = best_abc
+    logger.info(f"Plane fitting: {best_inliers}/{len(P)} inliers ({100*best_inliers/len(P):.1f}%)")
+
+    # Fill holes with plane
+    xs, ys = np.meshgrid(np.arange(W), np.arange(H))
+    Xf = (xs - cx) / fx
+    Yf = (ys - cy) / fy
+    z_plane = a * Xf + b_coef * Yf + c
+    z_plane[(z_plane <= 0) | (z_plane > zmax)] = 0
+
+    out = aligned_m.copy()
+    zero_mask = out <= 0
+    out[zero_mask] = z_plane[zero_mask].astype(np.float32)
+
+    return out
+
+
+# ======================== Main Alignment Function ========================
 
 def align_depth_to_rgb(
     depth_img: np.ndarray,
@@ -240,22 +336,27 @@ def align_depth_to_rgb(
     T_d2r: Optional[Tuple[np.ndarray, np.ndarray]] = None,
     depth_unit: str = 'm',
     hole_fill: bool = True,
-    joint_bilateral: bool = True,
+    joint_bilateral: bool = False,
     bilateral_params: Optional[dict] = None,
     use_simple_resize: bool = False,
-    auto_direction: bool = True
+    rgb_img: Optional[np.ndarray] = None,
+    splat_mode: str = 'bilinear',
+    do_dense: bool = False,
+    plane_fill: bool = False,
+    undistort_depth: bool = False
 ) -> np.ndarray:
     """
-    Align depth image to RGB image resolution and frame with sub-pixel accuracy.
+    Align depth image to RGB image resolution and frame.
 
     Pipeline:
-    1. Undistort depth coordinates
+    1. Undistort depth (optional)
     2. Backproject to 3D (depth camera frame)
-    3. Transform to RGB camera frame (if T_d2r provided)
-       - Optional: Auto-detect correct extrinsics direction
+    3. Transform to RGB camera frame
     4. Project to RGB image coordinates
-    5. Sub-pixel splatting with Z-buffer
-    6. Hole filling and smoothing
+    5. Splat with Z-buffer (NN or bilinear)
+    6. Hole filling (optional, safe limits)
+    7. Dense completion via JBU (optional, requires rgb_img)
+    8. Plane filling (optional)
 
     Args:
         depth_img: HxW depth image (e.g., 512x512)
@@ -266,11 +367,15 @@ def align_depth_to_rgb(
         rgb_size: (width, height) of RGB image (e.g., 3840x2160)
         T_d2r: Optional (R, t) transformation from depth to RGB frame
         depth_unit: 'm' or 'mm' or 'auto'
-        hole_fill: Whether to fill holes
-        joint_bilateral: Whether to apply joint bilateral filter
+        hole_fill: Whether to fill small holes
+        joint_bilateral: Legacy parameter (use do_dense instead)
         bilateral_params: Parameters for bilateral filter
-        use_simple_resize: Use simple resize (for hardware-aligned depth like Orbbec)
-        auto_direction: Auto-detect extrinsics direction (forward vs inverse)
+        use_simple_resize: Use simple resize (for hardware-aligned depth)
+        rgb_img: Optional RGB image for dense completion (BGR format)
+        splat_mode: 'nn' or 'bilinear'
+        do_dense: Enable dense completion via JBU (requires rgb_img)
+        plane_fill: Enable plane-based hole filling
+        undistort_depth: Apply depth undistortion
 
     Returns:
         Aligned depth image at RGB resolution (H_rgb x W_rgb), in meters
@@ -279,26 +384,32 @@ def align_depth_to_rgb(
     w_rgb, h_rgb = rgb_size
 
     logger.info(f"Aligning depth {w_depth}x{h_depth} to RGB {w_rgb}x{h_rgb}")
+    logger.info(f"  Mode: splat={splat_mode}, dense={do_dense}, plane_fill={plane_fill}")
 
     # Auto-detect depth unit if requested
     if depth_unit == 'auto':
-        from .utils import detect_depth_unit
-        depth_unit = detect_depth_unit(depth_img)
+        max_val = float(depth_img.max(initial=0))
+        if max_val > 100:
+            depth_unit = 'mm'
+        else:
+            depth_unit = 'm'
         logger.info(f"Auto-detected depth unit: {depth_unit}")
 
     # Convert depth to meters
+    depth_m = depth_img.astype(np.float32)
     if depth_unit == 'mm':
-        depth_img = depth_img / 1000.0
+        depth_m /= 1000.0
 
-    # FAST PATH: For hardware-aligned depth (e.g., Orbbec aligned_depth_to_color)
+    # FAST PATH: For hardware-aligned depth (simple resize)
     if use_simple_resize:
         logger.info("Using simple resize (hardware-aligned depth)")
-        aligned_depth = cv2.resize(depth_img, (w_rgb, h_rgb), interpolation=cv2.INTER_NEAREST)
+        aligned_depth = cv2.resize(depth_m, (w_rgb, h_rgb), interpolation=cv2.INTER_NEAREST)
 
         if hole_fill:
             aligned_depth = fill_depth_holes(aligned_depth)
 
-        if joint_bilateral:
+        # Legacy bilateral filter support
+        if joint_bilateral and not do_dense:
             if bilateral_params is None:
                 bilateral_params = {'d': 9, 'sigma_color': 75, 'sigma_space': 75}
             max_val = np.max(aligned_depth)
@@ -315,11 +426,16 @@ def align_depth_to_rgb(
         logger.info(f"Filled pixels: {np.sum(aligned_depth > 0)}/{h_rgb*w_rgb}")
         return aligned_depth
 
+    # Undistort depth (optional)
+    if undistort_depth and depth_D is not None and len(depth_D) > 0 and np.any(depth_D != 0):
+        logger.info("Undistorting depth image")
+        depth_m = cv2.undistort(depth_m, depth_K, depth_D)
+
     # Create coordinate grids
     u_depth, v_depth = np.meshgrid(np.arange(w_depth), np.arange(h_depth))
-    u_depth = u_depth.flatten()
-    v_depth = v_depth.flatten()
-    depth_values = depth_img.flatten()
+    u_depth = u_depth.flatten().astype(np.float32)
+    v_depth = v_depth.flatten().astype(np.float32)
+    depth_values = depth_m.flatten()
 
     # Filter valid depths
     valid_mask = depth_values > 0
@@ -331,116 +447,69 @@ def align_depth_to_rgb(
         logger.warning("No valid depth values found")
         return np.zeros((h_rgb, w_rgb), dtype=np.float32)
 
-    logger.debug(f"Valid depth pixels: {len(depth_values)}/{h_depth*w_depth}")
-
-    # Undistort depth coordinates
-    depth_points = np.stack([u_depth, v_depth], axis=-1)
-    depth_points_undist = undistort_points(depth_points, depth_K, depth_D)
-    u_depth, v_depth = depth_points_undist[:, 0], depth_points_undist[:, 1]
-    logger.debug(f"Undistorted depth coordinates")
-
-    # Auto-detect extrinsics direction (before backprojection for efficiency)
-    R_use, t_use = None, None
-    if T_d2r is not None:
-        R_fwd, t_fwd = T_d2r
-        if auto_direction:
-            R_use, t_use = probe_extrinsics_direction(
-                u_depth, v_depth, depth_values,
-                depth_K, rgb_K,
-                R_fwd, t_fwd,
-                w_rgb, h_rgb,
-                sample_ratio=0.1
-            )
-        else:
-            R_use, t_use = R_fwd, t_fwd
-            logger.info("Using provided extrinsics without auto-detection")
+    logger.debug(f"Valid depth pixels: {len(depth_values)}/{h_depth*w_depth} ({100*len(depth_values)/(h_depth*w_depth):.1f}%)")
 
     # Backproject to 3D (depth camera frame)
     points_3d = backproject_depth(u_depth, v_depth, depth_values, depth_K)
 
-    # Transform to RGB frame if needed
-    if R_use is not None and t_use is not None:
-        # Apply: P_color = R @ P_depth + t
-        # Using matrix form: points @ R.T + t.T for vectorized operation
-        points_3d = points_3d @ R_use.T + t_use.T  # t is (3,1), t.T is (1,3) for broadcasting
+    # Transform to RGB frame if extrinsics provided
+    if T_d2r is not None:
+        R, t = T_d2r
+        # P_rgb = R @ P_depth + t
+        points_3d = points_3d @ R.T + t.reshape(1, 3)
 
     # Project to RGB image
     rgb_coords, valid_proj = project_3d_to_image(points_3d, rgb_K)
 
-    # Filter valid projections (z > 0)
-    valid_proj &= (rgb_coords[:, 0] >= 0) & (rgb_coords[:, 0] < w_rgb - 1)
-    valid_proj &= (rgb_coords[:, 1] >= 0) & (rgb_coords[:, 1] < h_rgb - 1)
+    # Filter valid projections
+    valid_proj &= (rgb_coords[:, 0] >= 0) & (rgb_coords[:, 0] < w_rgb)
+    valid_proj &= (rgb_coords[:, 1] >= 0) & (rgb_coords[:, 1] < h_rgb)
 
     rgb_coords = rgb_coords[valid_proj]
     depth_values_proj = points_3d[valid_proj, 2]
 
-    logger.debug(f"Valid projections: {len(depth_values_proj)}/{len(valid_proj)}")
+    logger.debug(f"Valid projections: {len(depth_values_proj)}/{len(valid_proj)} ({100*np.sum(valid_proj)/len(valid_proj):.1f}%)")
 
-    # Sub-pixel splatting with Z-buffer
-    aligned_depth = splat_depth_subpixel(rgb_coords, depth_values_proj, w_rgb, h_rgb)
+    # Splat with Z-buffer
+    if splat_mode == 'bilinear':
+        aligned_depth = splat_bilinear(w_rgb, h_rgb, rgb_coords, depth_values_proj)
+    else:
+        aligned_depth = splat_nn(w_rgb, h_rgb, rgb_coords, depth_values_proj)
 
-    logger.info(f"Filled pixels: {np.sum(aligned_depth > 0)}/{h_rgb*w_rgb} ({np.sum(aligned_depth > 0)/(h_rgb*w_rgb)*100:.1f}%)")
+    coverage = np.sum(aligned_depth > 0) / (h_rgb * w_rgb)
+    logger.info(f"Splat coverage: {coverage:.1%}")
 
-    # Hole filling
+    # Hole filling (small holes only, with safety limits)
     if hole_fill:
-        aligned_depth = fill_depth_holes(aligned_depth)
+        aligned_depth = fill_depth_holes(aligned_depth, max_hole_size=10, max_fill_ratio=0.15)
         logger.debug("Hole filling completed")
 
-    # Joint bilateral filtering for edge-preserving smoothing
-    if joint_bilateral:
-        if bilateral_params is None:
-            bilateral_params = {'d': 9, 'sigma_color': 75, 'sigma_space': 75}
+    # Dense completion (requires RGB image)
+    if do_dense:
+        if rgb_img is not None:
+            logger.info("Performing dense completion with JBU")
+            if bilateral_params is None:
+                bilateral_params = {'d': 9, 'sigma_color': 75, 'sigma_space': 75}
 
-        max_val = np.max(aligned_depth)
-        if max_val > 0:  # Avoid division by zero
-            # Convert to 8-bit for bilateral filter
-            depth_normalized = (aligned_depth / max_val * 255).astype(np.uint8)
-            depth_filtered = cv2.bilateralFilter(
-                depth_normalized,
-                bilateral_params['d'],
-                bilateral_params['sigma_color'],
-                bilateral_params['sigma_space']
+            aligned_depth, confidence = jbu_complete_depth_to_dense(
+                aligned_depth, rgb_img,
+                d=bilateral_params.get('d', 9),
+                sigma_color=bilateral_params.get('sigma_color', 75),
+                sigma_space=bilateral_params.get('sigma_space', 75)
             )
-            # Convert back
-            aligned_depth = (depth_filtered / 255.0) * max_val
-            logger.debug("Bilateral filtering completed")
+            logger.debug(f"Dense completion: mean confidence = {confidence.mean():.2f}")
         else:
-            logger.warning("Skipping bilateral filter: no valid depth values")
+            logger.warning("Dense completion requested but no RGB image provided, skipping")
+
+    # Plane filling (optional, for planar scenes)
+    if plane_fill:
+        logger.info("Applying plane-based hole filling")
+        aligned_depth = ransac_plane_fill(aligned_depth, rgb_K, tol=0.02, zmax=10.0)
+
+    final_coverage = np.sum(aligned_depth > 0) / (h_rgb * w_rgb)
+    logger.info(f"Final coverage: {final_coverage:.1%}")
 
     return aligned_depth
-
-
-def fill_depth_holes(depth: np.ndarray, max_hole_size: int = 10) -> np.ndarray:
-    """
-    Fill small holes in depth map using inpainting.
-
-    Args:
-        depth: Depth image with holes (zero values)
-        max_hole_size: Maximum hole size to fill
-
-    Returns:
-        Depth image with holes filled
-    """
-    # Create mask for holes
-    mask = (depth == 0).astype(np.uint8)
-
-    if np.count_nonzero(mask) == 0:
-        return depth
-
-    # Inpaint only small holes
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (max_hole_size, max_hole_size))
-    mask_small = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    mask_fill = mask & (~mask_small)
-
-    # Convert depth to uint16 for inpainting
-    depth_scaled = (depth * 1000).astype(np.uint16)
-    depth_filled = cv2.inpaint(depth_scaled, mask_fill, inpaintRadius=3, flags=cv2.INPAINT_TELEA)
-    depth_filled = depth_filled.astype(np.float32) / 1000.0
-
-    # Keep original values where they exist
-    depth_filled[depth > 0] = depth[depth > 0]
-
-    return depth_filled
 
 
 def validate_alignment(aligned_depth: np.ndarray, plane_points: Optional[np.ndarray] = None,
@@ -490,7 +559,8 @@ if __name__ == '__main__':
     aligned = align_depth_to_rgb(
         depth, rgb_K, rgb_D, depth_K, depth_D,
         rgb_size=(3840, 2160),
-        depth_unit='m'
+        depth_unit='m',
+        splat_mode='bilinear'
     )
 
     print(f"Aligned depth shape: {aligned.shape}")

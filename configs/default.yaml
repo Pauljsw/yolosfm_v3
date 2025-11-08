@@ -52,8 +52,12 @@ scale_alignment:
 align:
   in_depth_unit: "auto"      # "m", "mm", or "auto" (auto-detect)
   use_simple_resize: false   # Use proper geometric transformation with intrinsics/extrinsics
-  hole_fill: true
-  joint_bilateral: true
+  splat_mode: "bilinear"     # "nn" or "bilinear" (sub-pixel splatting)
+  undistort_depth: false     # Apply depth undistortion (usually not needed if SDK pre-rectifies)
+  hole_fill: false           # Fill small holes (conservative, max 15% of image)
+  joint_bilateral: false     # Legacy parameter (use do_dense instead)
+  do_dense: false            # Enable dense completion with JBU (requires RGB)
+  plane_fill: false          # Enable RANSAC plane filling (for planar scenes)
   bilateral_d: 9
   bilateral_sigma_color: 75
   bilateral_sigma_space: 75

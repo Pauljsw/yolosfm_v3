@@ -404,16 +404,24 @@ class Pipeline:
             }
             
             output_dir = f"{self.config['paths']['out_dir']}/aligned_depth"
-            
+            rgb_dir = Path(self.config['paths']['rgb_dir'])
+
             for i, depth_file in enumerate(depth_files):
                 image_id = Path(depth_file).stem
-                
+
                 logger.info(f"Processing [{i+1}/{len(depth_files)}]: {image_id}")
-                
+
                 # Load depth
                 import cv2
                 depth_img = cv2.imread(depth_file, cv2.IMREAD_UNCHANGED).astype(np.float32)
-                
+
+                # Load RGB (for dense completion)
+                rgb_img = None
+                rgb_name = image_id.replace("camera_DPT_", "camera_RGB_") + ".png"
+                rgb_path = rgb_dir / rgb_name
+                if rgb_path.exists():
+                    rgb_img = cv2.imread(str(rgb_path), cv2.IMREAD_COLOR)
+
                 # Align
                 aligned = align_depth_to_rgb(
                     depth_img,
@@ -422,12 +430,17 @@ class Pipeline:
                     self.depth_calib.K,
                     self.depth_calib.D,
                     rgb_size=(self.rgb_calib.width, self.rgb_calib.height),
-                    T_d2r=T_d2r,  # ← 이 줄 추가!
+                    T_d2r=T_d2r,
                     depth_unit=align_config['in_depth_unit'],
                     hole_fill=align_config['hole_fill'],
-                    joint_bilateral=align_config['joint_bilateral'],
+                    joint_bilateral=align_config.get('joint_bilateral', False),
                     bilateral_params=bilateral_params,
-                    use_simple_resize=align_config.get('use_simple_resize', False)
+                    use_simple_resize=align_config.get('use_simple_resize', False),
+                    rgb_img=rgb_img,
+                    splat_mode=align_config.get('splat_mode', 'bilinear'),
+                    do_dense=align_config.get('do_dense', False),
+                    plane_fill=align_config.get('plane_fill', False),
+                    undistort_depth=align_config.get('undistort_depth', False)
                 )
                 
                 # Save
