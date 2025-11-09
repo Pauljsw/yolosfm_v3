@@ -157,7 +157,133 @@ class ResultExporter:
                 f.write(f'{x:.6f} {y:.6f} {z:.6f} {r} {g} {b} {label}\n')
         
         logger.info(f"Exported {len(instances)} instances ({len(all_points)} points) to PLY")
-    
+
+    def export_rgb_colored_cloud_ply(
+        self,
+        rgb_dir: str,
+        aligned_depth_dir: str,
+        camera_K: np.ndarray,
+        max_images: int = 10,
+        filename: str = 'rgb_colored_cloud.ply'
+    ):
+        """
+        Export RGB-colored point cloud from aligned depth and RGB images.
+
+        Creates a point cloud with actual RGB colors from images.
+
+        Args:
+            rgb_dir: Directory containing RGB images
+            aligned_depth_dir: Directory containing aligned depth images
+            camera_K: 3x3 camera intrinsics matrix
+            max_images: Maximum number of images to process (to limit file size)
+            filename: Output filename
+        """
+        import cv2
+
+        rgb_dir = Path(rgb_dir)
+        aligned_depth_dir = Path(aligned_depth_dir)
+        output_path = self.output_dir / filename
+
+        logger.info(f"Exporting RGB-colored point cloud to {output_path}")
+
+        # Find all aligned depth images
+        depth_files = sorted(aligned_depth_dir.glob('*.png'))[:max_images]
+
+        if len(depth_files) == 0:
+            logger.warning(f"No aligned depth images found in {aligned_depth_dir}")
+            return
+
+        logger.info(f"Processing {len(depth_files)} images for RGB point cloud...")
+
+        all_points = []
+        all_colors = []
+
+        fx = camera_K[0, 0]
+        fy = camera_K[1, 1]
+        cx = camera_K[0, 2]
+        cy = camera_K[1, 2]
+
+        for idx, depth_path in enumerate(depth_files):
+            # Convert depth filename to RGB filename
+            depth_id = depth_path.stem
+            rgb_id = depth_id.replace("camera_DPT_", "camera_RGB_")
+            rgb_path = rgb_dir / f"{rgb_id}.png"
+
+            if not rgb_path.exists():
+                logger.debug(f"RGB image not found: {rgb_path}")
+                continue
+
+            # Load depth and RGB
+            depth_img = cv2.imread(str(depth_path), cv2.IMREAD_UNCHANGED).astype(np.float32) / 1000.0  # to meters
+            rgb_img = cv2.imread(str(rgb_path))
+
+            if rgb_img is None or depth_img is None:
+                continue
+
+            h, w = depth_img.shape
+
+            # Downsample for efficiency (every 4 pixels)
+            stride = 4
+            for v in range(0, h, stride):
+                for u in range(0, w, stride):
+                    depth = depth_img[v, u]
+
+                    # Valid depth range
+                    if depth < 0.1 or depth > 10.0:
+                        continue
+
+                    # Unproject to 3D
+                    x = (u - cx) * depth / fx
+                    y = (v - cy) * depth / fy
+                    z = depth
+
+                    # Get RGB color
+                    b, g, r = rgb_img[v, u]
+
+                    all_points.append([x, y, z])
+                    all_colors.append([r, g, b])
+
+            logger.info(f"  Processed image {idx+1}/{len(depth_files)}: {len(all_points)} points so far")
+
+        if len(all_points) == 0:
+            logger.warning("No valid points found for RGB cloud")
+            return
+
+        all_points = np.array(all_points, dtype=np.float32)
+        all_colors = np.array(all_colors, dtype=np.uint8)
+
+        logger.info(f"Total points: {len(all_points)}")
+
+        # Write PLY (binary format for efficiency)
+        with open(output_path, 'wb') as f:
+            # Header
+            header = (
+                "ply\n"
+                "format binary_little_endian 1.0\n"
+                f"element vertex {len(all_points)}\n"
+                "property float x\n"
+                "property float y\n"
+                "property float z\n"
+                "property uchar red\n"
+                "property uchar green\n"
+                "property uchar blue\n"
+                "end_header\n"
+            )
+            f.write(header.encode('ascii'))
+
+            # Data (binary)
+            for i in range(len(all_points)):
+                x, y, z = all_points[i]
+                r, g, b = all_colors[i]
+
+                # Write as binary: 3 floats + 3 uchars
+                f.write(x.tobytes())
+                f.write(y.tobytes())
+                f.write(z.tobytes())
+                f.write(bytes([r, g, b]))
+
+        logger.info(f"Exported RGB-colored cloud with {len(all_points)} points to {output_path}")
+
     def export_measurements_csv(
         self,
         measurements: List[Dict],
@@ -646,6 +772,20 @@ def export_all_results(
 
     # Export instances
     exporter.export_instances_ply(instances)
+
+    # Export RGB-colored point cloud (if paths available)
+    if 'camera_K' in config and 'paths' in config:
+        try:
+            logger.info("Exporting RGB-colored point cloud...")
+            exporter.export_rgb_colored_cloud_ply(
+                rgb_dir=config['paths']['rgb_dir'],
+                aligned_depth_dir=f"{config['paths']['out_dir']}/aligned_depth",
+                camera_K=config['camera_K'],
+                max_images=10,  # Limit to 10 images to keep file size reasonable
+                filename='rgb_colored_cloud.ply'
+            )
+        except Exception as e:
+            logger.warning(f"Failed to export RGB-colored cloud: {e}")
 
     # Export measurements
     exporter.export_measurements_csv(measurements)

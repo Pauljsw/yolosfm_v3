@@ -706,33 +706,46 @@ class Pipeline:
         logger.info("=" * 80)
         logger.info("Stage 4: Measurement")
         logger.info("=" * 80)
-        
+
         with Timer("Measurement"):
             measure_config = self.config['measure']
-            
+
+            # Prepare data paths for RGB pixel-level width refinement
+            data_paths = {
+                'rgb_dir': self.config['paths']['rgb_dir'],
+                'aligned_depth_dir': f"{self.config['paths']['out_dir']}/aligned_depth",
+                'masks_dir': self.config['paths']['masks_dir'],
+                'camera_K': self.rgb_calib.K  # 3x3 intrinsics matrix
+            }
+
             measurements = measure_all_instances(
                 instances,
                 voxel_size,
-                measure_config
+                measure_config,
+                data_paths
             )
-            
+
             logger.info(f"Measured {len(measurements)} instances")
         
         # Stage 5: Export
         logger.info("=" * 80)
         logger.info("Stage 5: Export Results")
         logger.info("=" * 80)
-        
+
         with Timer("Export"):
             output_dir = f"{self.config['paths']['out_dir']}/fused"
-            
+
+            # Add camera K to config for RGB-colored cloud export
+            config_with_camera = self.config.copy()
+            config_with_camera['camera_K'] = self.rgb_calib.K
+
             export_all_results(
                 fusion_result,
                 instances,
                 measurements,
                 output_dir,
                 self.class_names,
-                self.config,
+                config_with_camera,
                 self.colors
             )
         
