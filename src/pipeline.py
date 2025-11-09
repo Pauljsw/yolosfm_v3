@@ -600,11 +600,15 @@ class Pipeline:
 
             for i, image_id in enumerate(image_ids):
                 logger.info(f"Processing image [{i+1}/{len(image_ids)}]: {image_id}")
-                
+
                 # Load aligned depth
-                depth_path = aligned_depth_dir / f"{image_id}.png"
+                # Convert RGB image_id to DPT image_id (Phase 3 saves with DPT naming)
+                depth_image_id = image_id.replace("camera_RGB_", "camera_DPT_")
+                depth_path = aligned_depth_dir / f"{depth_image_id}.png"
                 if not depth_path.exists():
                     logger.warning(f"Aligned depth not found: {depth_path}")
+                    logger.warning(f"  Expected: {depth_path}")
+                    logger.warning(f"  (Converted from RGB id: {image_id})")
                     continue
 
                 import cv2
