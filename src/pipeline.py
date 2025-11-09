@@ -540,6 +540,14 @@ class Pipeline:
         logger.info("Running YOLO segmentation on %d images", len(images_to_process))
 
         with Timer("YOLO Inference"):
+            # Setup visualization directory
+            vis_dir = Path(self.config['paths']['out_dir']) / 'yolo_visualizations'
+
+            # Convert RGB colors to BGR for OpenCV
+            bgr_colors = {}
+            for class_name, rgb_color in self.colors.items():
+                bgr_colors[class_name] = [rgb_color[2], rgb_color[1], rgb_color[0]]  # RGB -> BGR
+
             inferencer = YOLOSegmenter(
                 weights_path=str(weights_path),
                 class_names=self.class_names,
@@ -547,7 +555,9 @@ class Pipeline:
                 iou=yolo_config.get('iou', 0.45),
                 img_size=yolo_config.get('img_size', 1024),
                 device=yolo_config.get('device'),
-                max_det=yolo_config.get('max_det', 300)
+                max_det=yolo_config.get('max_det', 300),
+                visualization_dir=str(vis_dir),
+                colors=bgr_colors
             )
 
             for idx, (image_id, image_path, mask_path) in enumerate(images_to_process, start=1):
@@ -555,6 +565,7 @@ class Pipeline:
                 inferencer.process_image(str(image_path), str(mask_path))
 
         logger.info("YOLO inference completed. Masks saved to %s", masks_dir)
+        logger.info("YOLO visualizations saved to %s", vis_dir)
 
     def run_fusion(self, reinfer_mode: str = 'off'):
         """
