@@ -1,6 +1,6 @@
 """
 Export Module
-Exports results to various formats: PLY, CSV, GeoJSON.
+Exports results to various formats: PLY, CSV, GeoJSON, PNG, HTML.
 """
 import numpy as np
 import json
@@ -394,6 +394,214 @@ class ResultExporter:
         
         logger.info("Report generated successfully")
 
+    def export_pointcloud_images(
+        self,
+        voxel_centers: np.ndarray,
+        labels: np.ndarray,
+        filename_prefix: str = 'pointcloud',
+        angles: List[tuple] = None
+    ):
+        """
+        Render point cloud to PNG images from multiple viewpoints.
+
+        Args:
+            voxel_centers: Nx3 coordinates
+            labels: N class labels
+            filename_prefix: Prefix for output filenames
+            angles: List of (azimuth, elevation) tuples in degrees
+        """
+        try:
+            import open3d as o3d
+        except ImportError:
+            logger.warning("open3d not installed, skipping PNG rendering. Install with: pip install open3d")
+            return
+
+        logger.info(f"Rendering point cloud images to {self.output_dir}")
+
+        # Create Open3D point cloud
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(voxel_centers)
+
+        # Assign colors based on labels
+        colors = np.zeros((len(labels), 3), dtype=np.float64)
+        for i, label in enumerate(labels):
+            class_name = self.class_names[label]
+            rgb = self.colors.get(class_name, [128, 128, 128])
+            colors[i] = [rgb[0]/255.0, rgb[1]/255.0, rgb[2]/255.0]
+
+        pcd.colors = o3d.utility.Vector3dVector(colors)
+
+        # Default viewing angles if not specified
+        if angles is None:
+            angles = [
+                (0, 0),      # Front
+                (90, 0),     # Right
+                (180, 0),    # Back
+                (270, 0),    # Left
+                (0, 45),     # Top-front
+                (0, -45),    # Bottom-front
+            ]
+
+        # Render from each angle
+        vis = o3d.visualization.Visualizer()
+        vis.create_window(visible=False, width=1920, height=1080)
+        vis.add_geometry(pcd)
+
+        render_option = vis.get_render_option()
+        render_option.point_size = 3.0
+        render_option.background_color = np.array([1, 1, 1])  # White background
+
+        for i, (azimuth, elevation) in enumerate(angles):
+            # Set camera view
+            ctr = vis.get_view_control()
+            ctr.set_front([np.sin(np.radians(azimuth)) * np.cos(np.radians(elevation)),
+                          np.sin(np.radians(elevation)),
+                          np.cos(np.radians(azimuth)) * np.cos(np.radians(elevation))])
+            ctr.set_up([0, 1, 0])
+
+            # Capture image
+            output_path = self.output_dir / f"{filename_prefix}_view_{i:02d}_az{azimuth:03d}_el{elevation:+03d}.png"
+            vis.capture_screen_image(str(output_path), do_render=True)
+            logger.info(f"  Rendered view {i+1}/{len(angles)}: {output_path.name}")
+
+        vis.destroy_window()
+        logger.info(f"Rendered {len(angles)} point cloud images")
+
+    def export_interactive_html(
+        self,
+        voxel_centers: np.ndarray,
+        labels: np.ndarray,
+        measurements: List[Dict],
+        filename: str = 'interactive_3d.html'
+    ):
+        """
+        Create interactive 3D visualization using Plotly.
+
+        Args:
+            voxel_centers: Nx3 coordinates
+            labels: N class labels
+            measurements: List of measurement dictionaries
+            filename: Output HTML filename
+        """
+        try:
+            import plotly.graph_objects as go
+        except ImportError:
+            logger.warning("plotly not installed, skipping HTML visualization. Install with: pip install plotly")
+            return
+
+        output_path = self.output_dir / filename
+        logger.info(f"Creating interactive 3D visualization: {output_path}")
+
+        # Sample points if too many (plotly can be slow with >100k points)
+        max_points = 50000
+        if len(voxel_centers) > max_points:
+            logger.info(f"Sampling {max_points} points from {len(voxel_centers)} for performance")
+            indices = np.random.choice(len(voxel_centers), max_points, replace=False)
+            voxel_centers = voxel_centers[indices]
+            labels = labels[indices]
+
+        # Prepare data by class
+        traces = []
+
+        for class_id, class_name in enumerate(self.class_names):
+            mask = labels == class_id
+            if not np.any(mask):
+                continue
+
+            points = voxel_centers[mask]
+            rgb = self.colors.get(class_name, [128, 128, 128])
+            color_str = f'rgb({rgb[0]}, {rgb[1]}, {rgb[2]})'
+
+            trace = go.Scatter3d(
+                x=points[:, 0],
+                y=points[:, 1],
+                z=points[:, 2],
+                mode='markers',
+                name=f"{class_name} ({np.sum(mask)} points)",
+                marker=dict(
+                    size=2,
+                    color=color_str,
+                    opacity=0.8
+                ),
+                hovertemplate=f"<b>{class_name}</b><br>" +
+                             "X: %{x:.3f}<br>" +
+                             "Y: %{y:.3f}<br>" +
+                             "Z: %{z:.3f}<br>" +
+                             "<extra></extra>"
+            )
+            traces.append(trace)
+
+        # Add instance centroids as larger markers
+        if measurements:
+            centroids = []
+            centroid_labels = []
+            centroid_texts = []
+
+            for m in measurements:
+                centroid = m.get('centroid')
+                if centroid is not None:
+                    centroids.append(centroid)
+                    class_name = m.get('class_name', 'unknown')
+                    centroid_labels.append(class_name)
+
+                    # Create hover text
+                    if 'length_m' in m:
+                        text = f"{m['instance_id']}<br>Length: {m['length_m']:.2f}m"
+                    elif 'area_m2' in m:
+                        text = f"{m['instance_id']}<br>Area: {m['area_m2']:.4f}m²"
+                    else:
+                        text = m['instance_id']
+                    centroid_texts.append(text)
+
+            if centroids:
+                centroids = np.array(centroids)
+                trace_centroids = go.Scatter3d(
+                    x=centroids[:, 0],
+                    y=centroids[:, 1],
+                    z=centroids[:, 2],
+                    mode='markers+text',
+                    name='Instance Centroids',
+                    marker=dict(
+                        size=8,
+                        color='black',
+                        symbol='diamond',
+                        line=dict(width=2, color='white')
+                    ),
+                    text=[str(i+1) for i in range(len(centroids))],
+                    textposition='top center',
+                    hovertext=centroid_texts,
+                    hovertemplate="%{hovertext}<extra></extra>"
+                )
+                traces.append(trace_centroids)
+
+        # Create figure
+        fig = go.Figure(data=traces)
+
+        # Update layout
+        fig.update_layout(
+            title='3D Defect Visualization (Interactive)',
+            scene=dict(
+                xaxis_title='X (m)',
+                yaxis_title='Y (m)',
+                zaxis_title='Z (m)',
+                aspectmode='data'
+            ),
+            width=1400,
+            height=900,
+            showlegend=True,
+            legend=dict(
+                x=0.02,
+                y=0.98,
+                bgcolor='rgba(255,255,255,0.8)',
+                bordercolor='black',
+                borderwidth=1
+            )
+        )
+
+        # Save HTML
+        fig.write_html(str(output_path))
+        logger.info(f"Interactive HTML visualization saved")
+
 
 def export_all_results(
     fusion_result: Dict,
@@ -417,28 +625,45 @@ def export_all_results(
         colors: Color mapping for classes
     """
     exporter = ResultExporter(output_dir, class_names, colors)
-    
+
     # Export labeled cloud
     exporter.export_labeled_cloud_ply(
         fusion_result['voxel_centers'],
         fusion_result['labels'],
         fusion_result['probabilities']
     )
-    
+
     # Export instances
     exporter.export_instances_ply(instances)
-    
+
     # Export measurements
     exporter.export_measurements_csv(measurements)
     exporter.export_instances_geojson(measurements)
-    
+
     # Export report
     exporter.export_report_markdown(
         fusion_result['stats'],
         measurements,
         config
     )
-    
+
+    # Export visualizations (PNG images from multiple angles)
+    logger.info("Generating visualization images...")
+    exporter.export_pointcloud_images(
+        fusion_result['voxel_centers'],
+        fusion_result['labels'],
+        filename_prefix='crack_pointcloud'
+    )
+
+    # Export interactive HTML
+    logger.info("Generating interactive 3D HTML...")
+    exporter.export_interactive_html(
+        fusion_result['voxel_centers'],
+        fusion_result['labels'],
+        measurements,
+        filename='crack_visualization_interactive.html'
+    )
+
     logger.info(f"All results exported to {output_dir}")
 
 

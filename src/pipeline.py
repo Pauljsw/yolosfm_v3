@@ -662,17 +662,37 @@ class Pipeline:
             # Finalize fusion
             prob_thresh = fusion_config['prob_thresh']
             fusion_result = fusion.finalize(prob_thresh=prob_thresh)
-            
+
             logger.info(f"Fusion complete: {len(fusion_result['labels'])} labeled voxels")
-        
+
+            # Filter classes if specified in config
+            process_classes_only = fusion_config.get('process_classes_only', None)
+            if process_classes_only:
+                logger.info(f"Filtering to process only classes: {process_classes_only}")
+
+                # Get class IDs to keep
+                keep_class_ids = [self.class_id_map[cls] for cls in process_classes_only if cls in self.class_id_map]
+
+                # Filter fusion result
+                mask = np.isin(fusion_result['labels'], keep_class_ids)
+                original_count = len(fusion_result['labels'])
+
+                fusion_result['voxel_centers'] = fusion_result['voxel_centers'][mask]
+                fusion_result['labels'] = fusion_result['labels'][mask]
+                fusion_result['probabilities'] = fusion_result['probabilities'][mask]
+
+                filtered_count = len(fusion_result['labels'])
+                logger.info(f"Filtered voxels: {original_count} → {filtered_count} "
+                          f"(removed {original_count - filtered_count} non-crack voxels)")
+
         # Stage 3: Instance Merging
         logger.info("=" * 80)
         logger.info("Stage 3: Instance Merging")
         logger.info("=" * 80)
-        
+
         with Timer("Instance Merging"):
             merge_config = self.config['merge']
-            
+
             instances = merge_pipeline(
                 fusion_result,
                 voxel_size,

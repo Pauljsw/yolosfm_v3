@@ -66,7 +66,8 @@ align:
 fusion:
   voxel_size_cm: 0.1        # Coarse voxel grid (일반 영역)
   voxel_size_mm_crack: 3.0  # ✅ Fine voxel for crack ROI (3mm = 균열 폭 측정 가능)
-  prob_thresh: 0.05         # Probability threshold for voxel occupancy
+  prob_thresh: 0.1          # Probability threshold for voxel occupancy (0.05 → 0.1로 상향)
+  process_classes_only: ['crack']  # ✅ Only process these classes (다른 클래스는 오탐지 제거)
   weight:
     angle_cos_min: 0.3          # Minimum viewing angle cosine (0.3 = ~72° max angle)
     conf_min: 0.2               # Minimum YOLO confidence for fusion
