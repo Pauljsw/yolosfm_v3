@@ -513,6 +513,10 @@ def run_depth_reconstruction(
         if rgb_img is None:
             logger.warning(f"Failed to load RGB image: {rgb_path}, using depth-only mode")
             rgb_img = None
+        else:
+            # Resize RGB to match depth resolution for TSDF integration
+            depth_h, depth_w = depth_img.shape
+            rgb_img = cv2.resize(rgb_img, (depth_w, depth_h), interpolation=cv2.INTER_LINEAR)
 
         # Integrate frame with ICP odometry and RGB colors
         stats = reconstructor.integrate_frame(
