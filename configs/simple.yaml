@@ -1,0 +1,52 @@
+# Simple Pipeline Configuration
+# For SFM-based crack measurement with pixel-to-mm calibration
+
+paths:
+  rgb_dir: data/rgb
+  depth_dir: data/depth
+  masks_dir: data/yolo_masks
+  sfm_dir: data/sfm
+  calib_rgb: calib/rgb_camera_info.json
+  calib_depth: calib/depth_camera_info.json
+  out_dir: outputs
+
+# YOLO Segmentation
+yolo:
+  weights: models/best.pt
+  data_config: yolo_data.yaml
+  conf: 0.20                # Low threshold to catch all cracks
+  iou: 0.45
+  img_size: 1280
+  device: null              # Auto-detect (use GPU if available)
+  max_det: 300
+
+# SFM (Structure from Motion)
+sfm:
+  camera_model: OPENCV      # PINHOLE, OPENCV, RADIAL, SIMPLE_RADIAL
+  quality: high             # low, medium, high, extreme
+  use_gpu: true
+  dense: false              # Set to true if you have CUDA (see DENSE_SFM_SETUP.md)
+                            # Sparse is sufficient for crack measurement
+
+# Pixel-to-MM Calibration
+pixel_calibration:
+  save_maps: false          # Save individual scale maps (.npy)
+  num_samples: 9            # 3x3 grid sampling
+
+# Point Cloud Overlay
+point_cloud_overlay:
+  crack_color: [255, 0, 0]  # Red for cracks
+  min_track_length: 2       # Minimum observations per 3D point
+
+# Measurement
+measurement:
+  min_length_mm: 10.0       # Minimum crack length (1cm)
+  img_shape: [2160, 3840]   # (H, W) for rasterization
+
+# Class Definitions
+classes:
+  crack: 0
+
+# Visualization Colors
+colors:
+  crack: [255, 0, 0]  # Red
