@@ -203,7 +203,37 @@ class InstanceMerger:
         
         logger.info(f"InstanceMerger initialized: eps={self.eps:.4f}m, "
                    f"min_samples={self.min_samples}, iou_thresh={self.iou_thresh}")
-    
+
+    def _check_bbox_overlap(
+        self,
+        inst_a: Instance3D,
+        inst_b: Instance3D,
+        margin: float = 0.0
+    ) -> bool:
+        """
+        Fast bounding box overlap check.
+
+        Args:
+            inst_a: First instance
+            inst_b: Second instance
+            margin: Additional margin to add to bboxes (meters)
+
+        Returns:
+            True if bboxes overlap (with margin), False otherwise
+        """
+        # Expand bboxes by margin
+        a_min = inst_a.bbox_min - margin
+        a_max = inst_a.bbox_max + margin
+        b_min = inst_b.bbox_min - margin
+        b_max = inst_b.bbox_max + margin
+
+        # Check overlap in all 3 dimensions
+        overlap_x = a_max[0] >= b_min[0] and b_max[0] >= a_min[0]
+        overlap_y = a_max[1] >= b_min[1] and b_max[1] >= a_min[1]
+        overlap_z = a_max[2] >= b_min[2] and b_max[2] >= a_min[2]
+
+        return overlap_x and overlap_y and overlap_z
+
     def cluster_class_voxels(
         self,
         voxel_centers: np.ndarray,
@@ -282,47 +312,73 @@ class InstanceMerger:
     ) -> List[Instance3D]:
         """
         Merge instances that are close or overlapping.
-        
+
         Uses IoU and minimum distance criteria.
-        
+
         Args:
             instances: List of Instance3D objects
-            
+
         Returns:
             List of merged instances
         """
         if len(instances) <= 1:
             return instances
-        
-        logger.info(f"Merging {len(instances)} instances...")
-        
-        # Build merge graph
+
         n = len(instances)
+        logger.info(f"Merging {n} instances (will check {n*(n-1)//2} pairs)...")
+
+        # Build merge graph
         merge_graph = defaultdict(set)
-        
+
+        total_pairs = n * (n - 1) // 2
+        checked_pairs = 0
+        merged_pairs = 0
+
         for i in range(n):
+            # Progress logging every 100 instances
+            if i % 100 == 0:
+                progress_pct = (i * (n - i)) / total_pairs * 100
+                logger.info(f"  Progress: {i}/{n} instances ({progress_pct:.1f}%), "
+                          f"merged {merged_pairs} pairs so far")
+
             for j in range(i + 1, n):
+                checked_pairs += 1
+
                 inst_a = instances[i]
                 inst_b = instances[j]
-                
+
                 # Check if same class
                 if inst_a.class_id != inst_b.class_id:
                     continue
-                
-                # Compute IoU
+
+                # OPTIMIZATION: BBox overlap check (very fast)
+                bbox_overlap = self._check_bbox_overlap(inst_a, inst_b, margin=self.distance_thresh)
+                if not bbox_overlap:
+                    continue  # Skip expensive IoU/distance computation
+
+                # Compute IoU (moderately expensive)
                 iou = inst_a.compute_iou_3d(inst_b, self.voxel_size)
-                
-                # Compute minimum distance
-                min_dist = inst_a.compute_min_distance(inst_b)
-                
-                # Merge if IoU > threshold OR distance < threshold
-                should_merge = (iou > self.iou_thresh) or (min_dist < self.distance_thresh)
-                
-                if should_merge:
+
+                # If IoU is high enough, merge without computing distance
+                if iou > self.iou_thresh:
                     merge_graph[i].add(j)
                     merge_graph[j].add(i)
-                    logger.debug(f"Merge candidate: {inst_a.instance_id} <-> {inst_b.instance_id} "
-                               f"(IoU={iou:.3f}, dist={min_dist:.4f}m)")
+                    merged_pairs += 1
+                    logger.debug(f"Merge by IoU: {inst_a.instance_id} <-> {inst_b.instance_id} "
+                               f"(IoU={iou:.3f})")
+                    continue
+
+                # Only compute distance if IoU check failed but bboxes overlap
+                min_dist = inst_a.compute_min_distance(inst_b)
+
+                if min_dist < self.distance_thresh:
+                    merge_graph[i].add(j)
+                    merge_graph[j].add(i)
+                    merged_pairs += 1
+                    logger.debug(f"Merge by distance: {inst_a.instance_id} <-> {inst_b.instance_id} "
+                               f"(dist={min_dist:.4f}m)")
+
+        logger.info(f"  Checked {checked_pairs} pairs, found {merged_pairs} merge candidates")
         
         # Find connected components (instances to merge together)
         visited = set()
