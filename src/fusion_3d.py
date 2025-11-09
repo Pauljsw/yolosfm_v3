@@ -76,7 +76,7 @@ class VoxelGrid:
     ):
         """
         Accumulate points into voxel grid with probabilistic fusion.
-        
+
         Args:
             points_3d: Nx3 points in world frame
             class_id: Class index
@@ -87,24 +87,34 @@ class VoxelGrid:
         """
         if len(points_3d) == 0:
             return
-        
+
+        # Log point count for diagnosis
+        logger.debug(f"  Accumulating {len(points_3d)} points (class {class_id})")
+
         # Convert to voxel coordinates
         voxel_coords = self._world_to_voxel(points_3d)
-        
+
+        # Log voxel range for diagnosis
+        voxel_min = voxel_coords.min(axis=0)
+        voxel_max = voxel_coords.max(axis=0)
+        voxel_span = voxel_max - voxel_min
+        logger.debug(f"  Voxel range: {voxel_min} to {voxel_max} (span: {voxel_span})")
+
         # Compute combined weight
         combined_weight = view_weight * angle_weight * distance_weight
-        
-        # Accumulate into voxels
-        unique_voxels = np.unique(voxel_coords, axis=0)
-        
-        for voxel_coord in unique_voxels:
-            voxel_idx = tuple(voxel_coord)
+
+        # Accumulate into voxels - OPTIMIZED with dictionary counting
+        from collections import Counter
+
+        # Convert voxel coords to tuples for hashing
+        voxel_tuples = [tuple(coord) for coord in voxel_coords]
+        voxel_counts = Counter(voxel_tuples)
+
+        logger.debug(f"  Processing {len(voxel_counts)} unique voxels")
+
+        for voxel_idx, num_points in voxel_counts.items():
             voxel = self.get_or_create_voxel(voxel_idx)
-            
-            # Count points in this voxel
-            mask = np.all(voxel_coords == voxel_coord, axis=1)
-            num_points = np.sum(mask)
-            
+
             # Update voxel with log-odds
             voxel.update_logodds(class_id, score, combined_weight, num_points)
     
