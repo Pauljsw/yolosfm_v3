@@ -187,23 +187,34 @@ class ResultExporter:
                     # Convert arrays to strings
                     if key in ['bbox_min', 'bbox_max', 'bbox_size', 'centroid']:
                         flat[key] = ';'.join([f'{v:.4f}' for v in value])
-                    elif key == 'orientation' or key == 'plane_normal':
+                    elif key in ['orientation', 'plane_normal']:
                         flat[key] = ';'.join([f'{v:.6f}' for v in value]) if value else ''
+                    elif key == 'endpoints':
+                        # Format endpoints as "x1,y1,z1;x2,y2,z2"
+                        if len(value) > 0:
+                            flat[key] = ';'.join([','.join([f'{v:.4f}' for v in pt]) for pt in value])
+                        else:
+                            flat[key] = ''
                     else:
+                        # Generic array handling
                         flat[key] = str(value)
                 else:
                     flat[key] = value
             flattened.append(flat)
-        
+
         # Write CSV
         if flattened:
-            fieldnames = list(flattened[0].keys())
-            
+            # Collect all unique keys from all measurements (handle optional fields)
+            all_keys = set()
+            for flat in flattened:
+                all_keys.update(flat.keys())
+            fieldnames = sorted(all_keys)  # Sort for consistent column order
+
             with open(output_path, 'w', newline='') as f:
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
                 writer.writeheader()
                 writer.writerows(flattened)
-            
+
             logger.info(f"Exported {len(flattened)} measurements to CSV")
     
     def export_instances_geojson(

@@ -66,7 +66,7 @@ align:
 fusion:
   voxel_size_cm: 0.1        # Coarse voxel grid (일반 영역)
   voxel_size_mm_crack: 3.0  # ✅ Fine voxel for crack ROI (3mm = 균열 폭 측정 가능)
-  prob_thresh: 0.1          # Probability threshold for voxel occupancy (0.05 → 0.1로 상향)
+  prob_thresh: 0.05         # Probability threshold (균열 voxel 유지)
   process_classes_only: ['crack']  # ✅ Only process these classes (다른 클래스는 오탐지 제거)
   weight:
     angle_cos_min: 0.3          # Minimum viewing angle cosine (0.3 = ~72° max angle)
@@ -75,14 +75,14 @@ fusion:
 
 # Phase 6: Instance Merge (중복 제거 최적화)
 merge:
-  dbscan_eps_voxel_mul: 2.0     # ✅ DBSCAN epsilon (복셀 크기의 배수)
-                                 # 2.0 = 보수적 병합 (균열을 세밀하게 분리)
-  dbscan_min_pts: 15            # ✅ Minimum points for cluster (노이즈 강력 제거)
-                                 # 15 = 작은 노이즈 무시, 실제 균열만 유지
-  iou_merge_thresh: 0.25        # ✅ IoU threshold for merging (중복 제거)
-                                 # 0.25 = 적극적 병합 (같은 균열의 중복 제거)
-  skeleton_gap_thresh_cm: 1.5   # ✅ Skeleton gap threshold (균열 연결 판정)
-                                 # 1.5cm = 근처 균열만 연결 (과연결 방지)
+  dbscan_eps_voxel_mul: 3.0     # ✅ DBSCAN epsilon (복셀 크기의 배수)
+                                 # 3.0 = 완화된 clustering (긴 균열 유지)
+  dbscan_min_pts: 10            # ✅ Minimum points for cluster (노이즈 제거)
+                                 # 10 = 작은 균열도 유지하면서 노이즈 제거
+  iou_merge_thresh: 0.30        # ✅ IoU threshold for merging (중복 제거)
+                                 # 0.30 = 중복 균열 병합
+  skeleton_gap_thresh_cm: 2.5   # ✅ Skeleton gap threshold (균열 연결 판정)
+                                 # 2.5cm = 끊어진 균열 연결 (긴 균열 측정)
 
 # Reinference Settings (선택적 품질 향상)
 reinfer:
@@ -99,8 +99,8 @@ reinfer:
 # Phase 7: Measurement (균열 길이/폭 측정)
 measure:
   crack_skeleton_smooth: true   # ✅ Enable skeleton smoothing (노이즈 제거, 깔끔한 측정)
-  crack_min_length_cm: 10.0      # ✅ Minimum crack length (cm)
-                                 # 3cm = 작은 노이즈 무시, 실제 균열만 측정
+  crack_min_length_cm: 3.0      # ✅ Minimum crack length (cm)
+                                 # 3cm = 작은 노이즈 무시, 짧은 균열도 포함
   area_min_m2: 0.0005           # ✅ Minimum area for area defects (m²)
                                  # 0.0005m² = 5cm² (작은 얼룩 무시)
   export_formats: ["ply", "geojson", "csv"]  # Export formats
